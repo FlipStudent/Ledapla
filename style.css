@@ -34,3 +34,9 @@ textarea{width:100%;min-height:140px;font-family:ui-monospace,monospace;font-siz
 .msg.user{background:var(--accent);color:#fff;margin-left:20%}
 .msg.ai{background:var(--bg);border:1px solid var(--line);margin-right:10%}
 details summary{cursor:pointer}
+.gridwrap{overflow-x:auto;margin-bottom:14px}
+.grid{display:grid;grid-template-columns:minmax(90px,.5fr) repeat(3,minmax(200px,1fr));gap:10px;min-width:820px}
+.gh{font-weight:700;padding:4px 2px;color:var(--muted)}
+.gh.verrijkt{color:var(--verrijkt)}.gh.basis{color:var(--basis)}.gh.intensief{color:var(--intensief)}
+.gname{font-weight:700;font-size:18px;padding-top:10px}
+.grid .block{background:var(--card)}

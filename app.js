@@ -77,8 +77,11 @@ function renderToday() {
   } else if (!subs.length) {
     h += `<div class="card muted">Geen vakken gepland op deze dag.</div>`;
   }
+  if (subs.length) {
+    h += `<div class="gridwrap"><div class="grid"><div class="gh">Vak</div>${GROUPS.map((g) => `<div class="gh ${g.id}">${g.name}</div>`).join("")}`;
+  }
   for (const s of subs) {
-    h += `<div class="card"><h2>${esc(s.name)}</h2><div class="blocks">`;
+    h += `<div class="gname">${esc(s.name)}</div>`;
     for (const g of GROUPS) {
       const k = s.id + "|" + g.id;
       const { lesson, retry, done } = lessonFor(s, g.id);
@@ -97,10 +100,10 @@ function renderToday() {
             <button class="fail ${res === "fail" ? "on" : ""}" data-act="res" data-k="${k}" data-v="fail" ${log.closed ? "disabled" : ""}>✗ Niet gelukt</button>
           </div>`;
       }
-      h += `<div class="block ${g.id}"><h4>${g.name}</h4>${body}</div>`;
+      h += `<div class="block ${g.id}">${body}</div>`;
     }
-    h += `</div></div>`;
   }
+  if (subs.length) h += `</div></div>`;
   if (subs.length) {
     h += `<div class="card row">
       <button class="btn" data-act="close" ${log.closed ? "disabled" : ""}>${log.closed ? "Dag is afgesloten" : "Dag afsluiten"}</button>
