@@ -173,25 +173,61 @@ function textToLessons(t) {
 }
 function renderSubjects() {
   const el = document.getElementById("vakken");
-  let h = `<div class="card"><p>Voer per vak je weekrooster en de lessen van je methode in, in volgorde.
-    Elke regel is één les: <code>code | titel | omschrijving</code>. Optioneel kun je erachter nog een aparte
-    omschrijving per groep zetten: <code>… | verrijkt | basis | intensief</code>.</p>
-    <button class="btn" data-act="addsubj">+ Vak toevoegen</button></div>`;
-  for (const s of state.subjects) {
-    h += `<div class="card" data-id="${s.id}">
-      <div class="row"><input class="sname" value="${esc(s.name)}" placeholder="Vak, bijv. Rekenen" style="font-weight:600">
-        <button class="btn danger" data-act="delsubj" style="margin-left:auto">Verwijder</button></div>
-      <p class="days">${DAYS.map(([v, n]) => `<label><input type="checkbox" class="sday" value="${v}" ${s.days.includes(v) ? "checked" : ""}> ${n}</label>`).join("")}</p>
-      <label class="muted">Terugvalmethode (wat doe je als een les niet lukt?)</label>
-      <textarea class="sfall" style="min-height:60px;font-family:inherit">${esc(s.fallback)}</textarea>
-      <label class="muted">Lessen (${s.lessons.length})</label>
-      <textarea class="slessons" placeholder="1.1.1 | Tafel van 3 | Oefenen met de tafel van 3 | Tafels t/m 12 | Blok 1 pag. 4 | Met materiaal">${esc(lessonsToText(s.lessons))}</textarea>
-      <div class="row" style="margin-top:8px">
-        ${GROUPS.map((g) => `<label>${g.name} start bij les <input type="number" min="1" class="sstart" data-g="${g.id}" value="${prog(s, g.id).idx + 1}" style="width:70px"></label>`).join("")}
-      </div>
-    </div>`;
+  let h = `<div class="card row"><span class="muted">Je vakken met weekrooster en methode-lessen.</span>
+    <button class="btn" data-act="addsubj" style="margin-left:auto">+ Vak toevoegen</button></div>`;
+  if (!state.subjects.length) h += `<div class="card muted">Nog geen vakken. Voeg je eerste vak toe.</div>`;
+  else {
+    h += `<div class="vgrid"><div class="gh">Vak</div><div class="gh">Dagen</div><div class="gh">Lessen</div><div class="gh"></div>`;
+    for (const s of state.subjects) {
+      const days = DAYS.filter(([v]) => s.days.includes(v)).map(([, n]) => n).join(", ") || "–";
+      h += `<div class="gname">${esc(s.name)}</div><div>${days}</div><div>${s.lessons.length}</div>
+        <div><button class="btn secondary" data-act="editsubj" data-id="${s.id}">Bewerken</button></div>`;
+    }
+    h += `</div>`;
   }
   el.innerHTML = h;
+}
+
+let draft = null; // {s, isNew, start}
+function openEditor(s, isNew) {
+  draft = { s: structuredClone(s), isNew, start: Object.fromEntries(GROUPS.map((g) => [g.id, prog(s, g.id).idx + 1])) };
+  const d = draft.s;
+  let dlg = document.getElementById("editdlg");
+  if (!dlg) { dlg = document.createElement("dialog"); dlg.id = "editdlg"; document.body.appendChild(dlg); }
+  dlg.innerHTML = `<form method="dialog" class="editform">
+    <h2>${isNew ? "Nieuw vak" : "Vak bewerken"}</h2>
+    <label>Naam<br><input id="e-name" value="${esc(d.name)}" placeholder="Bijv. Rekenen" style="width:100%"></label>
+    <p class="days">Dagen: ${DAYS.map(([v, n]) => `<label><input type="checkbox" class="e-day" value="${v}" ${d.days.includes(v) ? "checked" : ""}> ${n}</label>`).join("")}</p>
+    <label>Terugvalmethode <span class="muted">(wat doe je als een les niet lukt?)</span><br>
+      <textarea id="e-fall" style="min-height:60px;font-family:inherit">${esc(d.fallback)}</textarea></label>
+    <label>Lessen in volgorde <span class="muted">(één per regel: <code>code | titel | omschrijving</code>, optioneel <code>| verrijkt | basis | intensief</code>)</span><br>
+      <textarea id="e-lessons" placeholder="1.1.1 | Tafel van 3 | Oefenen met de tafel van 3 | Tafels t/m 12 | Blok 1 pag. 4 | Met materiaal">${esc(lessonsToText(d.lessons))}</textarea></label>
+    <div class="row">${GROUPS.map((g) => `<label>${g.name} start bij les <input type="number" min="1" class="e-start" data-g="${g.id}" value="${draft.start[g.id]}" style="width:70px"></label>`).join("")}</div>
+    <div class="row" style="margin-top:14px">
+      ${isNew ? "" : '<button type="button" class="btn danger" data-act="delsubj">Verwijderen</button>'}
+      <button type="button" class="btn secondary" data-act="canceledit" style="margin-left:auto">Annuleren</button>
+      <button type="button" class="btn" data-act="saveedit">Opslaan</button>
+    </div></form>`;
+  dlg.showModal();
+}
+function closeEditor() {
+  const dlg = document.getElementById("editdlg");
+  if (dlg?.open) dlg.close();
+  draft = null;
+}
+function saveEditor() {
+  const s = draft.s;
+  s.name = document.getElementById("e-name").value.trim() || "Naamloos vak";
+  s.days = [...document.querySelectorAll(".e-day:checked")].map((c) => c.value);
+  s.fallback = document.getElementById("e-fall").value;
+  s.lessons = textToLessons(document.getElementById("e-lessons").value);
+  if (draft.isNew) state.subjects.push(s);
+  else state.subjects = state.subjects.map((x) => (x.id === s.id ? s : x));
+  document.querySelectorAll(".e-start").forEach((i) => {
+    const n = Math.max(1, parseInt(i.value, 10) || 1) - 1;
+    if (draft.isNew || n !== prog(s, i.dataset.g).idx) state.progress[s.id + "|" + i.dataset.g] = { idx: n, retry: false };
+  });
+  save(); closeEditor(); renderSubjects();
 }
 
 // ---------- AI ----------
@@ -285,13 +321,15 @@ document.addEventListener("click", (e) => {
   }
   else if (a === "close") closeDay();
   else if (a === "tomorrow") showTomorrow();
-  else if (a === "addsubj") {
-    state.subjects.push({ id: uid(), name: "Nieuw vak", days: [], fallback: "", lessons: [] });
-    save(); renderSubjects();
-  }
+  else if (a === "addsubj") openEditor({ id: uid(), name: "", days: [], fallback: "", lessons: [] }, true);
+  else if (a === "editsubj") openEditor(state.subjects.find((s) => s.id === b.dataset.id), false);
+  else if (a === "canceledit") closeEditor();
+  else if (a === "saveedit") saveEditor();
   else if (a === "delsubj") {
-    const id = b.closest(".card").dataset.id;
-    if (confirm("Dit vak verwijderen?")) { state.subjects = state.subjects.filter((s) => s.id !== id); save(); renderSubjects(); }
+    if (draft && confirm("Dit vak verwijderen?")) {
+      state.subjects = state.subjects.filter((s) => s.id !== draft.s.id);
+      save(); closeEditor(); renderSubjects();
+    }
   }
   else if (a === "send") sendChat();
   else if (a === "savekey") { state.apiKey = document.getElementById("apikey").value.trim(); save(); b.textContent = "Opgeslagen ✓"; }
@@ -315,18 +353,6 @@ document.addEventListener("change", (e) => {
     return;
   }
   if (t.classList.contains("note")) { dayLog(date).notes[t.dataset.k] = t.value; save(); return; }
-  const card = t.closest("#vakken .card[data-id]");
-  if (!card) return;
-  const s = state.subjects.find((x) => x.id === card.dataset.id);
-  if (t.classList.contains("sname")) s.name = t.value;
-  else if (t.classList.contains("sday")) s.days = [...card.querySelectorAll(".sday:checked")].map((c) => c.value);
-  else if (t.classList.contains("sfall")) s.fallback = t.value;
-  else if (t.classList.contains("slessons")) { s.lessons = textToLessons(t.value); }
-  else if (t.classList.contains("sstart")) {
-    const n = Math.max(1, parseInt(t.value, 10) || 1) - 1;
-    state.progress[s.id + "|" + t.dataset.g] = { idx: n, retry: false };
-  }
-  save();
 });
 
 show("vandaag");
