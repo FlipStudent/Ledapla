@@ -378,27 +378,33 @@ function renderSubjects() {
   el.innerHTML = h;
 }
 
-let draft = null; // {s, isNew, start}
+let draft = null; // {s, isNew}
 function openEditor(s, isNew) {
-  draft = { s: structuredClone(s), isNew, start: Object.fromEntries(GROUPS.map((g) => [g.id, prog(s, g.id).idx + 1])) };
+  draft = { s: structuredClone(s), isNew };
   const d = draft.s;
   let dlg = document.getElementById("editdlg");
   if (!dlg) { dlg = document.createElement("dialog"); dlg.id = "editdlg"; document.body.appendChild(dlg); }
   dlg.innerHTML = `<form method="dialog" class="editform">
     <h2>${isNew ? "Nieuw vak" : "Vak bewerken"}</h2>
     <div class="row"><label style="flex:1">Naam<br><input id="e-name" value="${esc(d.name)}" placeholder="Bijv. Rekenen" style="width:100%"></label>
-    <label>Kleur<br><input type="color" id="e-color" value="${esc(d.color)}"></label></div>
+    <div>Kleur<br><span class="colors">
+      <label class="colorbtn" id="e-colorbtn" style="background:${esc(d.color)}" title="Kies een eigen kleur"><input type="color" id="e-color" value="${esc(d.color)}"></label>
+      ${COLORS.map((c) => `<button type="button" class="swatch" data-act="pickcolor" data-c="${c}" style="background:${c}" aria-label="Kleur ${c}"></button>`).join("")}
+    </span></div></div>
     <label>Terugvalmethode <span class="muted">(wat doe je als een les niet lukt?)</span><br>
       <textarea id="e-fall" style="min-height:60px;font-family:inherit">${esc(d.fallback)}</textarea></label>
     <label>Lessen in volgorde <span class="muted">(één per regel: <code>code | titel | omschrijving</code>, optioneel <code>| verrijkt | basis | intensief</code>)</span><br>
       <textarea id="e-lessons" placeholder="1.1.1 | Tafel van 3 | Oefenen met de tafel van 3 | Tafels t/m 12 | Blok 1 pag. 4 | Met materiaal">${esc(lessonsToText(d.lessons))}</textarea></label>
-    <div class="row">${GROUPS.map((g) => `<label>${g.name} start bij les <input type="number" min="1" class="e-start" data-g="${g.id}" value="${draft.start[g.id]}" style="width:70px"></label>`).join("")}</div>
     <div class="row" style="margin-top:14px">
       ${isNew ? "" : '<button type="button" class="btn danger" data-act="delsubj">Verwijderen</button>'}
       <button type="button" class="btn secondary" data-act="canceledit" style="margin-left:auto">Annuleren</button>
       <button type="button" class="btn" data-act="saveedit">Opslaan</button>
     </div></form>`;
   dlg.showModal();
+}
+function setEditColor(c) {
+  document.getElementById("e-color").value = c;
+  document.getElementById("e-colorbtn").style.background = c;
 }
 function closeEditor() {
   const dlg = document.getElementById("editdlg");
@@ -413,10 +419,6 @@ function saveEditor() {
   s.lessons = textToLessons(document.getElementById("e-lessons").value);
   if (draft.isNew) state.subjects.push(s);
   else state.subjects = state.subjects.map((x) => (x.id === s.id ? s : x));
-  document.querySelectorAll(".e-start").forEach((i) => {
-    const n = Math.max(1, parseInt(i.value, 10) || 1) - 1;
-    if (draft.isNew || n !== prog(s, i.dataset.g).idx) state.progress[s.id + "|" + i.dataset.g] = { idx: n, retry: false };
-  });
   save(); closeEditor(); renderSubjects();
 }
 function deleteSubject(id) {
@@ -555,6 +557,7 @@ document.addEventListener("click", (e) => {
   else if (a === "editsubj") openEditor(state.subjects.find((s) => s.id === b.dataset.id), false);
   else if (a === "canceledit") closeEditor();
   else if (a === "saveedit") saveEditor();
+  else if (a === "pickcolor") setEditColor(b.dataset.c);
   else if (a === "delsubj") {
     if (draft && confirm("Dit vak verwijderen? Het verdwijnt ook uit het rooster.")) {
       deleteSubject(draft.s.id);
@@ -572,6 +575,10 @@ document.addEventListener("click", (e) => {
   }
 });
 
+document.addEventListener("input", (e) => {
+  if (e.target.id === "e-color") setEditColor(e.target.value);
+});
+
 document.addEventListener("change", (e) => {
   const t = e.target;
   if (t.id === "datepick" && t.value) { date = t.value; renderToday(); return; }
@@ -583,6 +590,7 @@ document.addEventListener("change", (e) => {
     });
     return;
   }
+  if (t.id === "e-color") { setEditColor(t.value); return; }
   if (t.classList.contains("note")) { dayLog(date).notes[t.dataset.k] = t.value; save(); }
 });
 
