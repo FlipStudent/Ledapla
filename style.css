@@ -47,3 +47,21 @@ details summary{cursor:pointer}
 .gh.verrijkt{color:var(--verrijkt)}.gh.basis{color:var(--basis)}.gh.intensief{color:var(--intensief)}
 .gname{font-weight:700;font-size:18px;padding-top:10px}
 .grid .block{background:var(--card)}
+.wkwrap{overflow-x:auto;margin-top:10px}
+.wk{display:grid;grid-template-columns:44px repeat(5,minmax(120px,1fr));min-width:700px;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+.wk-h{padding:6px 8px;font-weight:700;border-bottom:1px solid var(--line);text-align:center}
+.wk-h[data-date]{cursor:pointer}
+.wk-h.sel{background:var(--accent);color:#fff}
+.wk-h.sel .muted{color:#e0e0ff}
+.wk-time{position:relative;font-size:11px;color:var(--muted)}
+.wk-time span{position:absolute;right:4px;transform:translateY(-6px)}
+.wk-col{position:relative;border-left:1px solid var(--line);background-image:linear-gradient(var(--line) 1px,transparent 1px)}
+#rooster .wk-col{cursor:copy}
+.wk-col.sel{background-color:rgba(79,70,229,.06)}
+.wk-b{position:absolute;box-sizing:border-box;padding:3px 6px;border-radius:6px;background:color-mix(in srgb,var(--c) 18%,var(--card));border-left:4px solid var(--c);overflow:hidden;font-size:12px;line-height:1.25;cursor:pointer}
+#rooster .wk-b{cursor:pointer}
+.wk-b strong{display:block;font-size:13px}
+.wk-b .t{display:block;color:var(--muted);font-size:11px}
+.wk-b .ls{display:inline-block;margin-right:6px}
+.wk-b .ls b{color:var(--muted)}
+.block.again{border-top-color:var(--line)}

@@ -3,35 +3,66 @@
 // Alles staat in localStorage; er is geen server nodig.
 
 const GROUPS = [
-  { id: "verrijkt", name: "Verrijkt" },
-  { id: "basis", name: "Basis" },
-  { id: "intensief", name: "Intensief" },
+  { id: "verrijkt", name: "Verrijkt", short: "V" },
+  { id: "basis", name: "Basis", short: "B" },
+  { id: "intensief", name: "Intensief", short: "I" },
 ];
 const DAYS = [["1", "Ma"], ["2", "Di"], ["3", "Wo"], ["4", "Do"], ["5", "Vr"]];
+const COLORS = ["#6366f1", "#0ea5e9", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899", "#14b8a6"];
 const KEY = "ledapla.v1";
 const MODEL = "claude-sonnet-5-5";
+const PX = 1.6; // pixels per minuut in het rooster
 
 const DEFAULT_STATE = {
-  subjects: [], // {id,name,days:[1-5],fallback,lessons:[{code,title,desc,verrijkt,basis,intensief}]}
+  v: 2,
+  subjects: [], // {id,name,color,fallback,lessons:[{code,title,desc,verrijkt,basis,intensief}]}
+  template: [], // {id,day:"1".."5",start:"08:30",end:"09:15",subjectId}
+  weeks: {}, // maandag (YYYY-MM-DD) -> eigen rooster voor die week (lijst blokken)
   progress: {}, // "subjectId|group" -> {idx, retry}
-  log: {}, // "YYYY-MM-DD" -> {closed, res:{"subjectId|group":"ok"|"fail"}, notes:{...}}
+  log: {}, // "YYYY-MM-DD" -> {closed, res, notes, snap}
   apiKey: "",
 };
 
 let state = load();
 let chat = [];
 let date = iso(new Date());
+let rmode = "template"; // "template" | "week"
+let rweek = monday(iso(new Date()));
 
+// ---------- opslag ----------
 function load() {
+  let s;
   try {
-    return Object.assign(structuredClone(DEFAULT_STATE), JSON.parse(localStorage.getItem(KEY) || "{}"));
+    s = Object.assign(structuredClone(DEFAULT_STATE), JSON.parse(localStorage.getItem(KEY) || "{}"));
   } catch (e) {
-    return structuredClone(DEFAULT_STATE);
+    s = structuredClone(DEFAULT_STATE);
   }
+  return migrate(s);
+}
+function migrate(s) {
+  if (!s.v || s.v < 2) {
+    // Oude versie: vakken hadden vaste dagen. Maak daar een sjabloon van.
+    let id = 0;
+    for (const [d] of DAYS) {
+      let m = 8 * 60 + 30;
+      for (const x of s.subjects) {
+        if ((x.days || []).includes(d)) {
+          s.template.push({ id: "m" + id++, day: d, start: fmt(m), end: fmt(m + 45), subjectId: x.id });
+          m += 45;
+        }
+      }
+    }
+    s.subjects.forEach((x) => delete x.days);
+    s.v = 2;
+  }
+  s.subjects.forEach((x, i) => { x.color ||= COLORS[i % COLORS.length]; });
+  return s;
 }
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { /* opslag niet beschikbaar */ }
 }
+
+// ---------- helpers ----------
 function iso(d) {
   const z = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
   return z.toISOString().slice(0, 10);
@@ -42,29 +73,116 @@ function addDays(s, n) {
   return iso(d);
 }
 function weekday(s) { return String(new Date(s + "T12:00:00").getDay()); }
+function monday(s) {
+  const wd = new Date(s + "T12:00:00").getDay();
+  return addDays(s, wd === 0 ? -6 : 1 - wd);
+}
+function niceDate(s, opts) { return new Date(s + "T12:00:00").toLocaleDateString("nl-NL", opts); }
+function toMin(t) { const [h, m] = t.split(":").map(Number); return h * 60 + m; }
+function fmt(m) { return String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0"); }
 function uid() { return Math.random().toString(36).slice(2, 9); }
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+function subj(id) { return state.subjects.find((s) => s.id === id); }
+function prog(s, g) { return state.progress[s.id + "|" + g] || { idx: 0, retry: false }; }
+function dayLog(d) { return (state.log[d] ||= { closed: false, res: {}, notes: {}, snap: {} }); }
 
-function prog(subj, g) {
-  return state.progress[subj.id + "|" + g] || { idx: 0, retry: false };
+// ---------- rooster-logica ----------
+function blocksFor(weekStart) { return state.weeks[weekStart] || state.template; }
+function blocksOn(d) {
+  return blocksFor(monday(d))
+    .filter((b) => b.day === weekday(d) && subj(b.subjectId))
+    .sort((a, b) => toMin(a.start) - toMin(b.start));
 }
-function dayLog(d) {
-  return (state.log[d] ||= { closed: false, res: {}, notes: {} });
-}
-function lessonFor(subj, g) {
-  const p = prog(subj, g);
-  const l = subj.lessons[p.idx];
-  return { lesson: l, retry: p.retry, done: !l };
+function subjectsOn(d) {
+  const out = [];
+  for (const b of blocksOn(d)) { const s = subj(b.subjectId); if (!out.includes(s)) out.push(s); }
+  return out;
 }
 
-// ---------- Vandaag ----------
+// Welke les hoort bij vak s, groep g op datum d? Voor toekomstige dagen
+// gaan we ervan uit dat elke les tussendoor lukt (verwachte voortgang).
+function lessonAt(s, g, d) {
+  const k = s.id + "|" + g;
+  const log = state.log[d];
+  if (log?.closed && log.snap?.[k]) {
+    const l = log.snap[k];
+    return { lesson: l.done ? null : l, retry: !!l.retry, done: !!l.done };
+  }
+  const p = prog(s, g);
+  const today = iso(new Date());
+  let n = 0;
+  for (let x = today, i = 0; x < d && i < 120; x = addDays(x, 1), i++) {
+    if (!state.log[x]?.closed && subjectsOn(x).includes(s)) n++;
+  }
+  const lesson = s.lessons[p.idx + n];
+  return { lesson, retry: p.retry && n === 0, done: !lesson };
+}
+
+// ---------- week-weergave (rooster en startpagina) ----------
+function lanes(bs) {
+  const ends = [], lane = new Map();
+  for (const b of bs) {
+    let i = ends.findIndex((e) => e <= toMin(b.start));
+    if (i < 0) { i = ends.length; ends.push(0); }
+    ends[i] = toMin(b.end);
+    lane.set(b.id, i);
+  }
+  return { lane, n: Math.max(1, ends.length) };
+}
+function lessonSummary(s, d) {
+  const ls = GROUPS.map((g) => ({ g, ...lessonAt(s, g.id, d) }));
+  const txt = (x) => (x.done ? "klaar" : x.lesson.code + (x.retry ? " ↻" : ""));
+  const same = ls.every((x) => txt(x) === txt(ls[0]));
+  if (same) {
+    return `<span class="ls">${esc(txt(ls[0]))}${ls[0].done ? "" : " " + esc(ls[0].lesson.title)}</span>`;
+  }
+  return ls.map((x) => `<span class="ls"><b>${x.g.short}</b> ${esc(txt(x))}</span>`).join("");
+}
+// ws: maandag van de week, of null voor het sjabloon. list: de blokken. edit: klikbaar bewerken.
+function renderWeek(ws, list, edit, sel) {
+  const bl = list.filter((b) => subj(b.subjectId));
+  let lo = 8 * 60, hi = 15 * 60 + 30;
+  for (const b of bl) {
+    lo = Math.min(lo, Math.floor(toMin(b.start) / 60) * 60);
+    hi = Math.max(hi, Math.ceil(toMin(b.end) / 60) * 60);
+  }
+  const H = (hi - lo) * PX;
+  let h = `<div class="wkwrap"><div class="wk"><div class="wk-h"></div>`;
+  DAYS.forEach(([, n], i) => {
+    const d = ws ? addDays(ws, i) : "";
+    h += `<div class="wk-h ${d && d === sel ? "sel" : ""}" ${d ? `data-date="${d}"` : ""}>${n}${d ? ` <span class="muted">${d.slice(8)}/${d.slice(5, 7)}</span>` : ""}</div>`;
+  });
+  h += `<div class="wk-time" style="height:${H}px">`;
+  for (let m = lo; m < hi; m += 60) h += `<span style="top:${(m - lo) * PX}px">${fmt(m)}</span>`;
+  h += `</div>`;
+  DAYS.forEach(([v], i) => {
+    const d = ws ? addDays(ws, i) : "";
+    const day = bl.filter((b) => b.day === v).sort((a, b) => toMin(a.start) - toMin(b.start));
+    const { lane, n } = lanes(day);
+    h += `<div class="wk-col ${d && d === sel ? "sel" : ""}" data-day="${v}" data-date="${d}" data-lo="${lo}" style="height:${H}px;background-size:100% ${60 * PX}px">`;
+    const seen = new Set();
+    for (const b of day) {
+      const s = subj(b.subjectId);
+      const first = !seen.has(s.id);
+      seen.add(s.id);
+      const body = !edit && d && first ? lessonSummary(s, d) : "";
+      h += `<div class="wk-b" data-id="${b.id}" style="top:${(toMin(b.start) - lo) * PX}px;height:${(toMin(b.end) - toMin(b.start)) * PX - 2}px;left:${(lane.get(b.id) / n) * 100}%;width:${100 / n}%;--c:${esc(s.color)}">
+        <strong>${esc(s.name)}</strong><span class="t">${b.start}–${b.end}</span>${body}</div>`;
+    }
+    h += `</div>`;
+  });
+  return h + `</div></div>`;
+}
+
+// ---------- Vandaag (startpagina) ----------
 function renderToday() {
   const el = document.getElementById("vandaag");
+  const today = iso(new Date());
   const log = dayLog(date);
-  const subs = state.subjects.filter((s) => s.days.includes(weekday(date)));
-  const label = new Date(date + "T12:00:00").toLocaleDateString("nl-NL", { weekday: "long", day: "numeric", month: "long" });
+  const readonly = log.closed || date > today;
+  const label = niceDate(date, { weekday: "long", day: "numeric", month: "long" });
   let h = `<div class="card row">
     <button class="btn secondary" data-act="prev">←</button>
     <input type="date" id="datepick" value="${date}">
@@ -73,18 +191,34 @@ function renderToday() {
     <strong style="margin-left:auto">${esc(label)}</strong>
   </div>`;
   if (!state.subjects.length) {
-    h += `<div class="card">Nog geen vakken. Ga naar <strong>Vakken &amp; methodes</strong> om je vakken, weekrooster en methode-lessen in te voeren.</div>`;
-  } else if (!subs.length) {
+    h += `<div class="card">Nog geen vakken. Maak eerst je vakken bij <strong>Vakken &amp; methodes</strong> en bouw daarna je rooster bij <strong>Rooster</strong>.</div>`;
+    el.innerHTML = h;
+    return;
+  }
+  const ws = monday(date);
+  h += `<div class="card"><div class="row"><h2 style="margin:0">Weekrooster</h2>
+    <span class="muted">${state.weeks[ws] ? "Aangepast voor deze week" : "Volgens sjabloon"} · verwachte lessen ingevuld · klik op een dag om te openen</span></div>
+    ${blocksFor(ws).length ? renderWeek(ws, blocksFor(ws), false, date) : '<p class="muted">Nog geen rooster. Maak het bij <strong>Rooster</strong>.</p>'}</div>`;
+
+  const blocks = blocksOn(date);
+  if (!blocks.length) {
     h += `<div class="card muted">Geen vakken gepland op deze dag.</div>`;
+    el.innerHTML = h;
+    return;
   }
-  if (subs.length) {
-    h += `<div class="gridwrap"><div class="grid"><div class="gh">Vak</div>${GROUPS.map((g) => `<div class="gh ${g.id}">${g.name}</div>`).join("")}`;
-  }
-  for (const s of subs) {
-    h += `<div class="gname">${esc(s.name)}</div>`;
+  h += `<div class="gridwrap"><div class="grid"><div class="gh">Vak</div>${GROUPS.map((g) => `<div class="gh ${g.id}">${g.name}</div>`).join("")}`;
+  const seen = new Set();
+  for (const b of blocks) {
+    const s = subj(b.subjectId);
+    h += `<div class="gname" style="border-left:5px solid ${esc(s.color)};padding-left:8px">${esc(s.name)}<div class="muted" style="font-weight:400;font-size:14px">${b.start}–${b.end}</div></div>`;
+    if (seen.has(s.id)) {
+      h += `<div class="block again" style="grid-column:span 3"><span class="muted">Zelfde les als hierboven.</span></div>`;
+      continue;
+    }
+    seen.add(s.id);
     for (const g of GROUPS) {
       const k = s.id + "|" + g.id;
-      const { lesson, retry, done } = lessonFor(s, g.id);
+      const { lesson, retry, done } = lessonAt(s, g.id, date);
       const res = log.res[k];
       let body;
       if (done) body = `<p class="muted">Alle lessen van deze methode zijn klaar. 🎉</p>`;
@@ -96,36 +230,33 @@ function renderToday() {
           ${lesson.desc ? `<p class="muted">${esc(lesson.desc)}</p>` : ""}${extra}${fb}
           <input class="note" data-k="${k}" placeholder="Notitie…" value="${esc(log.notes[k] || "")}" style="width:100%">
           <div class="status">
-            <button class="ok ${res === "ok" ? "on" : ""}" data-act="res" data-k="${k}" data-v="ok" ${log.closed ? "disabled" : ""}>✓ Gelukt</button>
-            <button class="fail ${res === "fail" ? "on" : ""}" data-act="res" data-k="${k}" data-v="fail" ${log.closed ? "disabled" : ""}>✗ Niet gelukt</button>
+            <button class="ok ${res === "ok" ? "on" : ""}" data-act="res" data-k="${k}" data-v="ok" ${readonly ? "disabled" : ""}>✓ Gelukt</button>
+            <button class="fail ${res === "fail" ? "on" : ""}" data-act="res" data-k="${k}" data-v="fail" ${readonly ? "disabled" : ""}>✗ Niet gelukt</button>
           </div>`;
       }
       h += `<div class="block ${g.id}">${body}</div>`;
     }
   }
-  if (subs.length) h += `</div></div>`;
-  if (subs.length) {
-    h += `<div class="card row">
-      <button class="btn" data-act="close" ${log.closed ? "disabled" : ""}>${log.closed ? "Dag is afgesloten" : "Dag afsluiten"}</button>
-      <button class="btn secondary" data-act="tomorrow">Wat staat er morgen?</button>
-      <span class="muted">Gelukt = volgende les. Niet gelukt = zelfde les opnieuw met je terugvalmethode.</span>
-    </div><div id="tomorrow"></div>`;
-  }
+  h += `</div></div><div class="card row">
+      <button class="btn" data-act="close" ${readonly ? "disabled" : ""}>${log.closed ? "Dag is afgesloten" : "Dag afsluiten"}</button>
+      <span class="muted">${date > today ? "Je kunt een dag pas afsluiten als het zover is. " : ""}Gelukt = volgende les. Niet gelukt = zelfde les opnieuw met je terugvalmethode.</span>
+    </div>`;
   el.innerHTML = h;
 }
 
 function closeDay() {
   const log = dayLog(date);
-  if (log.closed) return;
-  const subs = state.subjects.filter((s) => s.days.includes(weekday(date)));
+  if (log.closed || date > iso(new Date())) return;
+  const subs = subjectsOn(date);
   const missing = [];
   for (const s of subs) for (const g of GROUPS) {
-    const k = s.id + "|" + g.id;
-    if (!lessonFor(s, g.id).done && !log.res[k]) missing.push(`${s.name} – ${g.name}`);
+    if (!lessonAt(s, g.id, date).done && !log.res[s.id + "|" + g.id]) missing.push(`${s.name} – ${g.name}`);
   }
   if (missing.length && !confirm("Nog niet ingevuld:\n" + missing.join("\n") + "\n\nToch afsluiten? Die blijven op dezelfde les staan.")) return;
   for (const s of subs) for (const g of GROUPS) {
     const k = s.id + "|" + g.id;
+    const la = lessonAt(s, g.id, date);
+    log.snap[k] = la.done ? { code: "", title: "Klaar", desc: "", done: true } : { ...la.lesson, retry: la.retry };
     const p = { ...prog(s, g.id) };
     if (log.res[k] === "ok") { p.idx += 1; p.retry = false; }
     else if (log.res[k] === "fail") { p.retry = true; }
@@ -134,31 +265,86 @@ function closeDay() {
   log.closed = true;
   save();
   renderToday();
-  showTomorrow();
 }
 
-function nextSchoolDay(d) {
-  let n = addDays(d, 1);
-  for (let i = 0; i < 7 && !state.subjects.some((s) => s.days.includes(weekday(n))); i++) n = addDays(n, 1);
-  return n;
+// ---------- Rooster (sjabloon en weken bewerken) ----------
+function editList() {
+  if (rmode === "template") return state.template;
+  return (state.weeks[rweek] ||= state.template.map((b) => ({ ...b })));
 }
-function showTomorrow() {
-  const box = document.getElementById("tomorrow");
-  if (!box) return;
-  const n = nextSchoolDay(date);
-  const subs = state.subjects.filter((s) => s.days.includes(weekday(n)));
-  const label = new Date(n + "T12:00:00").toLocaleDateString("nl-NL", { weekday: "long", day: "numeric", month: "long" });
-  const closed = dayLog(date).closed;
-  let h = `<div class="card"><h3>Voorbeeld ${esc(label)}</h3>${closed ? "" : '<p class="muted">Let op: deze dag is nog niet afgesloten, dus dit is gebaseerd op de huidige stand.</p>'}`;
-  for (const s of subs) {
-    h += `<p><strong>${esc(s.name)}</strong></p><ul>`;
-    for (const g of GROUPS) {
-      const { lesson, retry, done } = lessonFor(s, g.id);
-      h += `<li>${g.name}: ${done ? "klaar" : esc(lesson.code + " " + lesson.title) + (retry ? " (opnieuw, terugval)" : "")}</li>`;
-    }
-    h += "</ul>";
+function renderRooster() {
+  const el = document.getElementById("rooster");
+  const isT = rmode === "template";
+  let h = `<div class="card">
+    <div class="row">
+      <label><input type="radio" name="rmode" value="template" ${isT ? "checked" : ""}> <strong>Sjabloon</strong> (je standaardweek)</label>
+      <label><input type="radio" name="rmode" value="week" ${!isT ? "checked" : ""}> <strong>Specifieke week</strong></label>
+    </div>`;
+  if (!isT) {
+    h += `<div class="row" style="margin-top:8px">
+      <button class="btn secondary" data-act="rprev">←</button>
+      <strong>Week van ${esc(niceDate(rweek, { day: "numeric", month: "long", year: "numeric" }))}</strong>
+      <button class="btn secondary" data-act="rnext">→</button>
+      <button class="btn secondary" data-act="rthis">Deze week</button>
+      ${state.weeks[rweek] ? '<button class="btn secondary" data-act="rreset" style="margin-left:auto">Terug naar sjabloon</button>' : ""}
+    </div>
+    <p class="muted" style="margin-bottom:0">${state.weeks[rweek]
+      ? "Deze week heeft een eigen rooster. Het sjabloon blijft ongewijzigd."
+      : "Deze week volgt het sjabloon. Zodra je iets aanpast, krijgt alleen deze week een eigen rooster."}</p>`;
+  } else {
+    h += `<p class="muted" style="margin-bottom:0">Wijzigingen hier gelden voor alle weken die geen eigen rooster hebben.</p>`;
   }
-  box.innerHTML = h + "</div>";
+  h += `</div>`;
+  if (!state.subjects.length) {
+    h += `<div class="card">Maak eerst vakken bij <strong>Vakken &amp; methodes</strong>, dan kun je ze hier in het rooster zetten.</div>`;
+  } else {
+    h += `<p class="muted">Klik op een lege plek om een blok toe te voegen. Klik op een blok om het te bewerken.</p>`;
+    h += renderWeek(isT ? null : rweek, isT ? state.template : blocksFor(rweek), true, null);
+  }
+  el.innerHTML = h;
+}
+
+let bdraft = null; // {id|null, day, subjectId, start, end}
+function openBlock(b) {
+  bdraft = { ...b };
+  let dlg = document.getElementById("blockdlg");
+  if (!dlg) { dlg = document.createElement("dialog"); dlg.id = "blockdlg"; document.body.appendChild(dlg); }
+  const isNew = !b.id;
+  dlg.innerHTML = `<form method="dialog" class="editform">
+    <h2>${isNew ? "Blok toevoegen" : "Blok bewerken"}</h2>
+    <label>Vak<br><select id="b-subj">${state.subjects.map((s) => `<option value="${s.id}" ${s.id === b.subjectId ? "selected" : ""}>${esc(s.name)}</option>`).join("")}</select></label>
+    <div class="row">
+      <label>Dag <select id="b-day">${DAYS.map(([v, n]) => `<option value="${v}" ${v === b.day ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+      <label>Van <input type="time" id="b-start" step="300" value="${b.start}"></label>
+      <label>Tot <input type="time" id="b-end" step="300" value="${b.end}"></label>
+    </div>
+    ${isNew ? `<p class="days">Ook op: ${DAYS.map(([v, n]) => `<label><input type="checkbox" class="b-also" value="${v}"> ${n}</label>`).join("")}</p>` : ""}
+    <div class="row" style="margin-top:14px">
+      ${isNew ? "" : '<button type="button" class="btn danger" data-act="delblock">Verwijderen</button>'}
+      <button type="button" class="btn secondary" data-act="cancelblock" style="margin-left:auto">Annuleren</button>
+      <button type="button" class="btn" data-act="saveblock">Opslaan</button>
+    </div></form>`;
+  dlg.showModal();
+}
+function closeBlock() {
+  const dlg = document.getElementById("blockdlg");
+  if (dlg?.open) dlg.close();
+  bdraft = null;
+}
+function saveBlock() {
+  const start = document.getElementById("b-start").value;
+  const end = document.getElementById("b-end").value;
+  if (!start || !end || toMin(end) <= toMin(start)) { alert("De eindtijd moet na de starttijd liggen."); return; }
+  const subjectId = document.getElementById("b-subj").value;
+  const day = document.getElementById("b-day").value;
+  const list = editList();
+  if (bdraft.id) {
+    Object.assign(list.find((x) => x.id === bdraft.id), { subjectId, day, start, end });
+  } else {
+    const days = new Set([day, ...[...document.querySelectorAll(".b-also:checked")].map((c) => c.value)]);
+    for (const d of days) list.push({ id: uid(), day: d, start, end, subjectId });
+  }
+  save(); closeBlock(); renderRooster();
 }
 
 // ---------- Vakken ----------
@@ -173,14 +359,14 @@ function textToLessons(t) {
 }
 function renderSubjects() {
   const el = document.getElementById("vakken");
-  let h = `<div class="card row"><span class="muted">Je vakken met weekrooster en methode-lessen.</span>
+  let h = `<div class="card row"><span class="muted">Stel hier je vakken en methodes in. Het weekrooster maak je bij <strong>Rooster</strong>.</span>
     <button class="btn" data-act="addsubj" style="margin-left:auto">+ Vak toevoegen</button></div>`;
   if (!state.subjects.length) h += `<div class="card muted">Nog geen vakken. Voeg je eerste vak toe.</div>`;
   else {
-    h += `<div class="vgrid"><div class="gh">Vak</div><div class="gh">Dagen</div><div class="gh">Lessen</div><div class="gh"></div>`;
+    h += `<div class="vgrid"><div class="gh">Vak</div><div class="gh">Lessen</div><div class="gh">In sjabloon</div><div class="gh"></div>`;
     for (const s of state.subjects) {
-      const days = DAYS.filter(([v]) => s.days.includes(v)).map(([, n]) => n).join(", ") || "–";
-      h += `<div class="gname">${esc(s.name)}</div><div>${days}</div><div>${s.lessons.length}</div>
+      const n = state.template.filter((b) => b.subjectId === s.id).length;
+      h += `<div class="gname" style="border-left:5px solid ${esc(s.color)};padding-left:8px">${esc(s.name)}</div><div>${s.lessons.length}</div><div>${n}× per week</div>
         <div><button class="btn secondary" data-act="editsubj" data-id="${s.id}">Bewerken</button></div>`;
     }
     h += `</div>`;
@@ -196,8 +382,8 @@ function openEditor(s, isNew) {
   if (!dlg) { dlg = document.createElement("dialog"); dlg.id = "editdlg"; document.body.appendChild(dlg); }
   dlg.innerHTML = `<form method="dialog" class="editform">
     <h2>${isNew ? "Nieuw vak" : "Vak bewerken"}</h2>
-    <label>Naam<br><input id="e-name" value="${esc(d.name)}" placeholder="Bijv. Rekenen" style="width:100%"></label>
-    <p class="days">Dagen: ${DAYS.map(([v, n]) => `<label><input type="checkbox" class="e-day" value="${v}" ${d.days.includes(v) ? "checked" : ""}> ${n}</label>`).join("")}</p>
+    <div class="row"><label style="flex:1">Naam<br><input id="e-name" value="${esc(d.name)}" placeholder="Bijv. Rekenen" style="width:100%"></label>
+    <label>Kleur<br><input type="color" id="e-color" value="${esc(d.color)}"></label></div>
     <label>Terugvalmethode <span class="muted">(wat doe je als een les niet lukt?)</span><br>
       <textarea id="e-fall" style="min-height:60px;font-family:inherit">${esc(d.fallback)}</textarea></label>
     <label>Lessen in volgorde <span class="muted">(één per regel: <code>code | titel | omschrijving</code>, optioneel <code>| verrijkt | basis | intensief</code>)</span><br>
@@ -218,7 +404,7 @@ function closeEditor() {
 function saveEditor() {
   const s = draft.s;
   s.name = document.getElementById("e-name").value.trim() || "Naamloos vak";
-  s.days = [...document.querySelectorAll(".e-day:checked")].map((c) => c.value);
+  s.color = document.getElementById("e-color").value;
   s.fallback = document.getElementById("e-fall").value;
   s.lessons = textToLessons(document.getElementById("e-lessons").value);
   if (draft.isNew) state.subjects.push(s);
@@ -229,13 +415,18 @@ function saveEditor() {
   });
   save(); closeEditor(); renderSubjects();
 }
+function deleteSubject(id) {
+  state.subjects = state.subjects.filter((s) => s.id !== id);
+  state.template = state.template.filter((b) => b.subjectId !== id);
+  for (const w of Object.keys(state.weeks)) state.weeks[w] = state.weeks[w].filter((b) => b.subjectId !== id);
+}
 
 // ---------- AI ----------
 function planContext() {
   const log = dayLog(date);
-  const subs = state.subjects.filter((s) => s.days.includes(weekday(date)));
+  const subs = subjectsOn(date);
   return subs.map((s) => `${s.name}: ` + GROUPS.map((g) => {
-    const { lesson, retry, done } = lessonFor(s, g.id);
+    const { lesson, retry, done } = lessonAt(s, g.id, date);
     const r = log.res[s.id + "|" + g.id];
     return `${g.name}=${done ? "klaar" : lesson.code + " " + lesson.title}${retry ? " (terugval)" : ""}${r ? " [" + r + "]" : ""}`;
   }).join("; ")).join("\n") || "(geen vakken gepland)";
@@ -299,7 +490,7 @@ function renderSettings() {
 function show(tab) {
   document.querySelectorAll("main section").forEach((s) => (s.hidden = s.id !== tab));
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
-  ({ vandaag: renderToday, vakken: renderSubjects, chat: renderChat, instellingen: renderSettings })[tab]();
+  ({ vandaag: renderToday, rooster: renderRooster, vakken: renderSubjects, chat: renderChat, instellingen: renderSettings })[tab]();
 }
 
 document.getElementById("tabs").addEventListener("click", (e) => {
@@ -307,6 +498,29 @@ document.getElementById("tabs").addEventListener("click", (e) => {
 });
 
 document.addEventListener("click", (e) => {
+  // Klikken in het rooster: blok bewerken of nieuw blok op een lege plek.
+  const wkEdit = e.target.closest("#rooster .wk");
+  if (wkEdit && !e.target.closest(".wk-h")) {
+    const blk = e.target.closest(".wk-b");
+    if (blk) {
+      const b = editList().find((x) => x.id === blk.dataset.id);
+      if (b) openBlock(b);
+      return;
+    }
+    const col = e.target.closest(".wk-col");
+    if (col) {
+      const r = col.getBoundingClientRect();
+      const m = Math.max(0, Math.min(23 * 60 + 15, Math.round((+col.dataset.lo + (e.clientY - r.top) / PX) / 15) * 15));
+      openBlock({ id: null, day: col.dataset.day, subjectId: state.subjects[0].id, start: fmt(m), end: fmt(Math.min(m + 45, 24 * 60 - 1)) });
+      return;
+    }
+  }
+  // Klikken op een dag in het weekoverzicht van de startpagina.
+  const wkHome = e.target.closest("#vandaag .wk");
+  if (wkHome) {
+    const t = e.target.closest("[data-date]");
+    if (t && t.dataset.date) { date = t.dataset.date; renderToday(); return; }
+  }
   const b = e.target.closest("[data-act]");
   if (!b) return;
   const a = b.dataset.act;
@@ -315,19 +529,31 @@ document.addEventListener("click", (e) => {
   else if (a === "today") { date = iso(new Date()); renderToday(); }
   else if (a === "res") {
     const log = dayLog(date);
-    log.res[b.dataset.k] = log.res[b.dataset.k] === b.dataset.v ? undefined : b.dataset.v;
-    if (!log.res[b.dataset.k]) delete log.res[b.dataset.k];
+    if (log.res[b.dataset.k] === b.dataset.v) delete log.res[b.dataset.k];
+    else log.res[b.dataset.k] = b.dataset.v;
     save(); renderToday();
   }
   else if (a === "close") closeDay();
-  else if (a === "tomorrow") showTomorrow();
-  else if (a === "addsubj") openEditor({ id: uid(), name: "", days: [], fallback: "", lessons: [] }, true);
+  else if (a === "rprev") { rweek = addDays(rweek, -7); renderRooster(); }
+  else if (a === "rnext") { rweek = addDays(rweek, 7); renderRooster(); }
+  else if (a === "rthis") { rweek = monday(iso(new Date())); renderRooster(); }
+  else if (a === "rreset") {
+    if (confirm("Het aangepaste rooster van deze week weggooien en het sjabloon gebruiken?")) { delete state.weeks[rweek]; save(); renderRooster(); }
+  }
+  else if (a === "cancelblock") closeBlock();
+  else if (a === "saveblock") saveBlock();
+  else if (a === "delblock") {
+    const list = editList();
+    list.splice(list.findIndex((x) => x.id === bdraft.id), 1);
+    save(); closeBlock(); renderRooster();
+  }
+  else if (a === "addsubj") openEditor({ id: uid(), name: "", color: COLORS[state.subjects.length % COLORS.length], fallback: "", lessons: [] }, true);
   else if (a === "editsubj") openEditor(state.subjects.find((s) => s.id === b.dataset.id), false);
   else if (a === "canceledit") closeEditor();
   else if (a === "saveedit") saveEditor();
   else if (a === "delsubj") {
-    if (draft && confirm("Dit vak verwijderen?")) {
-      state.subjects = state.subjects.filter((s) => s.id !== draft.s.id);
+    if (draft && confirm("Dit vak verwijderen? Het verdwijnt ook uit het rooster.")) {
+      deleteSubject(draft.s.id);
       save(); closeEditor(); renderSubjects();
     }
   }
@@ -345,14 +571,15 @@ document.addEventListener("click", (e) => {
 document.addEventListener("change", (e) => {
   const t = e.target;
   if (t.id === "datepick" && t.value) { date = t.value; renderToday(); return; }
+  if (t.name === "rmode") { rmode = t.value; renderRooster(); return; }
   if (t.id === "imp" && t.files[0]) {
     t.files[0].text().then((txt) => {
-      try { state = Object.assign(structuredClone(DEFAULT_STATE), JSON.parse(txt)); save(); show("vandaag"); }
+      try { state = migrate(Object.assign(structuredClone(DEFAULT_STATE), JSON.parse(txt))); save(); show("vandaag"); }
       catch (err) { alert("Ongeldig bestand."); }
     });
     return;
   }
-  if (t.classList.contains("note")) { dayLog(date).notes[t.dataset.k] = t.value; save(); return; }
+  if (t.classList.contains("note")) { dayLog(date).notes[t.dataset.k] = t.value; save(); }
 });
 
 show("vandaag");
