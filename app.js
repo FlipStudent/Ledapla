@@ -31,12 +31,16 @@ let rweek = monday(iso(new Date()));
 
 // ---------- opslag ----------
 function load() {
-  let s;
   try {
-    s = Object.assign(structuredClone(DEFAULT_STATE), JSON.parse(localStorage.getItem(KEY) || "{}"));
+    return fromRaw(JSON.parse(localStorage.getItem(KEY) || "{}"));
   } catch (e) {
-    s = structuredClone(DEFAULT_STATE);
+    return structuredClone(DEFAULT_STATE);
   }
+}
+// Vul ontbrekende velden aan en zet oude opslag (zonder versie) om.
+function fromRaw(raw) {
+  const s = Object.assign(structuredClone(DEFAULT_STATE), raw);
+  if (!raw.v) s.v = 0;
   return migrate(s);
 }
 function migrate(s) {
@@ -574,7 +578,7 @@ document.addEventListener("change", (e) => {
   if (t.name === "rmode") { rmode = t.value; renderRooster(); return; }
   if (t.id === "imp" && t.files[0]) {
     t.files[0].text().then((txt) => {
-      try { state = migrate(Object.assign(structuredClone(DEFAULT_STATE), JSON.parse(txt))); save(); show("vandaag"); }
+      try { state = fromRaw(JSON.parse(txt)); save(); show("vandaag"); }
       catch (err) { alert("Ongeldig bestand."); }
     });
     return;
