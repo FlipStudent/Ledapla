@@ -29,6 +29,13 @@ textarea{width:100%;min-height:140px;font-family:ui-monospace,monospace;font-siz
 .status button.ok.on{background:var(--ok);color:#fff;border-color:var(--ok)}
 .status button.fail.on{background:var(--fail);color:#fff;border-color:var(--fail)}
 .days label{margin-right:10px;white-space:nowrap}
+.vgrid{display:grid;grid-template-columns:2fr 2fr 1fr auto;gap:10px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
+.vgrid .gh{font-weight:700;color:var(--muted)}
+.vgrid .gname{font-weight:700;font-size:18px}
+dialog{border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--ink);width:min(680px,calc(100vw - 24px));padding:16px}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+.editform label{display:block;margin-bottom:10px}
+.editform .days label,.editform .row label{display:inline-block}
 #log{max-height:420px;overflow:auto;margin-bottom:10px}
 .msg{padding:8px 12px;border-radius:10px;margin-bottom:8px;white-space:pre-wrap}
 .msg.user{background:var(--accent);color:#fff;margin-left:20%}
