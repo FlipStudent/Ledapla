@@ -17,6 +17,7 @@ const DEFAULT_STATE = {
   v: 2,
   subjects: [], // {id,name,color,fallback,lessons:[{code,title,desc,verrijkt,basis,intensief}]}
   template: [], // {id,day:"1".."5",start:"08:30",end:"09:15",subjectId}
+  preps: {}, // "datum|blokId" -> eigen voorbereidingstekst
   weeks: {}, // maandag (YYYY-MM-DD) -> eigen rooster voor die week (lijst blokken)
   progress: {}, // "subjectId|group" -> {idx, retry}
   log: {}, // "YYYY-MM-DD" -> {closed, res, notes, snap}
@@ -234,8 +235,8 @@ function renderToday() {
           ${lesson.desc ? `<p class="muted">${esc(lesson.desc)}</p>` : ""}${extra}${fb}
           <input class="note" data-k="${k}" placeholder="Notitie…" value="${esc(log.notes[k] || "")}" style="width:100%">
           <div class="status">
-            <button class="ok ${res === "ok" ? "on" : ""}" data-act="res" data-k="${k}" data-v="ok" ${readonly ? "disabled" : ""}>✓ Gelukt</button>
-            <button class="fail ${res === "fail" ? "on" : ""}" data-act="res" data-k="${k}" data-v="fail" ${readonly ? "disabled" : ""}>✗ Niet gelukt</button>
+            <button class="ok ${res === "ok" ? "on" : ""}" data-act="res" data-k="${k}" data-v="ok" ${readonly ? "disabled" : ""}>✓ Afronden</button>
+            <button class="fail ${res === "fail" ? "on" : ""}" data-act="res" data-k="${k}" data-v="fail" ${readonly ? "disabled" : ""}>✗ Doorzetten</button>
           </div>`;
       }
       h += `<div class="block ${g.id}">${body}</div>`;
@@ -243,7 +244,7 @@ function renderToday() {
   }
   h += `</div></div><div class="card row">
       <button class="btn" data-act="close" ${readonly ? "disabled" : ""}>${log.closed ? "Dag is afgesloten" : "Dag afsluiten"}</button>
-      <span class="muted">${date > today ? "Je kunt een dag pas afsluiten als het zover is. " : ""}Gelukt = volgende les. Niet gelukt = zelfde les opnieuw met je terugvalmethode.</span>
+      <span class="muted">${date > today ? "Je kunt een dag pas afsluiten als het zover is. " : ""}Afronden = volgende les. Doorzetten = zelfde les opnieuw met je terugvalmethode.</span>
     </div>`;
   el.innerHTML = h;
 }
@@ -448,6 +449,23 @@ function renderChat() {
     <button class="btn" data-act="send">Verstuur</button></div></div>`;
   const l = document.getElementById("log"); l.scrollTop = l.scrollHeight;
 }
+async function askClaude(system, messages) {
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": state.apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({ model: MODEL, max_tokens: 1024, system, messages }),
+  });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error?.message || r.status);
+  return j.content.map((c) => c.text || "").join("");
+}
+const SYSTEM_BASE = "Je bent een praktische onderwijsassistent voor een leerkracht in het basisonderwijs (Nederland). " +
+  "De klas heeft drie niveaugroepen: Verrijkt, Basis en Intensief. Geef korte, concrete suggesties in het Nederlands.";
 async function sendChat() {
   const ta = document.getElementById("chatin");
   const text = ta.value.trim();
@@ -455,27 +473,89 @@ async function sendChat() {
   chat.push({ role: "user", content: text });
   chat.push({ role: "assistant", content: "…" });
   renderChat();
-  const system = "Je bent een praktische onderwijsassistent voor een leerkracht in het basisonderwijs (Nederland). " +
-    "De klas heeft drie niveaugroepen: Verrijkt, Basis en Intensief. Geef korte, concrete suggesties in het Nederlands.\n" +
-    `Planning van ${date}:\n` + planContext();
   try {
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": state.apiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true",
-      },
-      body: JSON.stringify({ model: MODEL, max_tokens: 1024, system, messages: chat.slice(0, -1) }),
-    });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error?.message || r.status);
-    chat[chat.length - 1].content = j.content.map((c) => c.text || "").join("");
+    chat[chat.length - 1].content = await askClaude(SYSTEM_BASE + `\nPlanning van ${date}:\n` + planContext(), chat.slice(0, -1));
   } catch (e) {
     chat[chat.length - 1].content = "Fout: " + e.message;
   }
   renderChat();
+}
+
+// ---------- Les openen en voorbereiden ----------
+let ldraft = null; // {date, blockId, subjectId, ai}
+function prevDayFor(s, d) {
+  for (let x = addDays(d, -1), i = 0; i < 21; i++, x = addDays(x, -1)) if (subjectsOn(x).includes(s)) return x;
+  return null;
+}
+function lessonName(la) { return la.done ? "alles klaar" : `${la.lesson.code} ${la.lesson.title}${la.retry ? " (opnieuw)" : ""}`; }
+function defaultPrep(s, d) {
+  let out = `Vandaag:\n` + GROUPS.map((g) => `- ${g.name}: ${lessonName(lessonAt(s, g.id, d))}`).join("\n");
+  const pd = prevDayFor(s, d);
+  if (!pd) return out + "\n\nEerder: nog niet gegeven.";
+  const log = state.log[pd];
+  out += `\n\nEerder (${niceDate(pd, { weekday: "long", day: "numeric", month: "long" })}):\n` + GROUPS.map((g) => {
+    const r = log?.res?.[s.id + "|" + g.id];
+    const status = r === "ok" ? "afgerond" : r === "fail" ? "doorgezet naar de volgende keer" : "nog niet ingevuld";
+    return `- ${g.name}: ${lessonName(lessonAt(s, g.id, pd))} – ${status}`;
+  }).join("\n");
+  return out;
+}
+function openLesson(d, blockId) {
+  const b = blocksFor(monday(d)).find((x) => x.id === blockId);
+  const s = b && subj(b.subjectId);
+  if (!s) return;
+  ldraft = { date: d, blockId, subjectId: s.id, ai: "" };
+  const saved = state.preps[d + "|" + blockId];
+  let dlg = document.getElementById("lessondlg");
+  if (!dlg) { dlg = document.createElement("dialog"); dlg.id = "lessondlg"; document.body.appendChild(dlg); }
+  const hasKey = !!state.apiKey;
+  dlg.innerHTML = `<form method="dialog" class="editform">
+    <h2 style="border-left:6px solid ${esc(s.color)};padding-left:10px">${esc(s.name)}</h2>
+    <p class="muted">${esc(niceDate(d, { weekday: "long", day: "numeric", month: "long" }))} · ${b.start}–${b.end}</p>
+    <label>Overzicht en voorbereiding <span class="muted">(je kunt de tekst aanpassen en aanvullen)</span><br>
+      <textarea id="l-text" style="min-height:240px;font-family:inherit;font-size:15px">${esc(saved ?? defaultPrep(s, d))}</textarea></label>
+    <div class="row">
+      <button type="button" class="btn secondary" data-act="lreset">Automatische tekst herstellen</button>
+      <button type="button" class="btn secondary" data-act="lai" id="l-ai" ${hasKey ? "" : 'disabled title="Voeg eerst je API-sleutel toe bij Instellingen"'}>✨ Denk mee met Claude</button>
+      ${hasKey ? "" : '<span class="muted">Voeg een API-sleutel toe bij Instellingen om Claude mee te laten denken.</span>'}
+    </div>
+    <div id="l-aiout"></div>
+    <div class="row" style="margin-top:14px">
+      <button type="button" class="btn secondary" data-act="lclose" style="margin-left:auto">Sluiten</button>
+      <button type="button" class="btn" data-act="lsave">Opslaan</button>
+    </div></form>`;
+  dlg.showModal();
+}
+function closeLesson() {
+  const dlg = document.getElementById("lessondlg");
+  if (dlg?.open) dlg.close();
+  ldraft = null;
+}
+function saveLesson() {
+  const text = document.getElementById("l-text").value;
+  const s = subj(ldraft.subjectId);
+  const key = ldraft.date + "|" + ldraft.blockId;
+  if (text.trim() === "" || text === defaultPrep(s, ldraft.date)) delete state.preps[key];
+  else state.preps[key] = text;
+  save(); closeLesson();
+}
+async function lessonAI() {
+  const btn = document.getElementById("l-ai");
+  const out = document.getElementById("l-aiout");
+  const s = subj(ldraft.subjectId);
+  const text = document.getElementById("l-text").value;
+  btn.disabled = true;
+  out.innerHTML = `<p class="muted">Claude denkt mee…</p>`;
+  try {
+    const system = SYSTEM_BASE + ` Je denkt mee over de voorbereiding van een les ${s.name} op ${ldraft.date}. ` +
+      (s.fallback ? `Terugvalmethode van de leerkracht: ${s.fallback}. ` : "") +
+      "Reageer kort met: (1) wat je opvalt, (2) concrete tips of een korte lesopbouw per niveaugroep, (3) eventueel een vraag terug.";
+    ldraft.ai = await askClaude(system, [{ role: "user", content: "Dit is mijn voorbereiding:\n\n" + text + "\n\nDenk met me mee." }]);
+    out.innerHTML = `<div class="msg ai">${esc(ldraft.ai)}</div><button type="button" class="btn secondary" data-act="laiadd">Voeg toe aan mijn tekst</button>`;
+  } catch (e) {
+    out.innerHTML = `<div class="msg ai">Fout: ${esc(e.message)}</div>`;
+  }
+  btn.disabled = false;
 }
 
 // ---------- Instellingen ----------
@@ -524,6 +604,9 @@ document.addEventListener("click", (e) => {
   // Klikken op een dag in het weekoverzicht van de startpagina.
   const wkHome = e.target.closest("#vandaag .wk");
   if (wkHome) {
+    const blk = e.target.closest(".wk-b");
+    const col = e.target.closest(".wk-col");
+    if (blk && col && col.dataset.date) { openLesson(col.dataset.date, blk.dataset.id); return; }
     const t = e.target.closest("[data-date]");
     if (t && t.dataset.date) { date = t.dataset.date; renderToday(); return; }
   }
@@ -546,6 +629,11 @@ document.addEventListener("click", (e) => {
   else if (a === "rreset") {
     if (confirm("Het aangepaste rooster van deze week weggooien en het sjabloon gebruiken?")) { delete state.weeks[rweek]; save(); renderRooster(); }
   }
+  else if (a === "lclose") closeLesson();
+  else if (a === "lsave") saveLesson();
+  else if (a === "lreset") document.getElementById("l-text").value = defaultPrep(subj(ldraft.subjectId), ldraft.date);
+  else if (a === "lai") lessonAI();
+  else if (a === "laiadd") { const ta = document.getElementById("l-text"); ta.value += "\n\nClaude:\n" + ldraft.ai; }
   else if (a === "cancelblock") closeBlock();
   else if (a === "saveblock") saveBlock();
   else if (a === "delblock") {
